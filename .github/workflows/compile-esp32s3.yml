@@ -20,23 +20,27 @@ jobs:
         with:
           version: "0.35.3" # Khóa phiên bản CLI ổn định
 
-      - name: Tận diệt cấu hình lỗi cũ và Cài đặt Core ESP32 (Mẫu Chuẩn Sạch)
+      - name: Cài đặt Core phần cứng ESP32 Độc quyền Cục bộ (Fix Lỗi Sập URL)
         run: |
-          # [CỰC KỲ QUAN TRỌNG] Xóa cứng cưỡng bức toàn bộ thư mục cấu hình ẩn chứa link github.io lỗi của GitHub runner
-          rm -rf /home/runner/.arduino15/
-          rm -rf ~/.arduino15/
+          # 1. Tạo một thư mục sạch cục bộ riêng trong Workspace của dự án để làm nơi chứa dữ liệu mới
+          mkdir -p ./arduino_local_env/data
+          mkdir -p ./arduino_local_env/downloads
           
-          # Khởi tạo lại một file cấu hình hệ thống trống hoàn toàn mới
-          arduino-cli config init --overwrite
+          # 2. Ép khởi tạo một file cấu hình cục bộ riêng biệt biệt lập hoàn toàn
+          arduino-cli config init --overwrite --config-file ./arduino_local_env/arduino-cli.yaml
           
-          # Nạp duy nhất đường dẫn URL bổ sung của hãng Espressif
-          arduino-cli config set board_manager.additional_urls https://github.io
+          # 3. Cấu hình các đường dẫn lưu trữ trỏ hết vào thư mục cục bộ sạch vừa tạo, ngắt kết nối khỏi hệ thống ẩn của GitHub Runner
+          arduino-cli config set directories.data ./arduino_local_env/data --config-file ./arduino_local_env/arduino-cli.yaml
+          arduino-cli config set directories.downloads ./arduino_local_env/downloads --config-file ./arduino_local_env/arduino-cli.yaml
           
-          # Cập nhật lại toàn bộ chỉ mục index sạch từ đầu
-          arduino-cli core update-index
+          # 4. Ép ghi duy nhất một URL index chính chủ của hãng Espressif vào file cấu hình riêng này
+          arduino-cli config set board_manager.additional_urls https://github.io --config-file ./arduino_local_env/arduino-cli.yaml
           
-          # Tải và cài đặt lõi phần cứng esp32
-          arduino-cli core install esp32:esp32
+          # 5. Gọi cập nhật chỉ mục index bằng cách ép sử dụng file cấu hình sạch vừa tạo
+          arduino-cli core update-index --config-file ./arduino_local_env/arduino-cli.yaml
+          
+          # 6. Tải và cài đặt lõi phần cứng esp32 vào môi trường cục bộ riêng biệt
+          arduino-cli core install esp32:esp32 --config-file ./arduino_local_env/arduino-cli.yaml
 
       - name: Biên dịch mã nguồn và Ép cấu hình phần cứng TinyUSB
         uses: arduino/compile-sketches@v1
@@ -48,7 +52,9 @@ jobs:
             - name: "NimBLE-Arduino"
 
           # ÉP CẤU HÌNH PHẦN CỨNG: Bật chế độ USB-OTG TinyUSB để bo mạch ESP32-S3 nhận diện làm Chuột/Bàn phím
+          # Đồng thời truyền file cấu hình sạch cục bộ sang cho bước biên dịch kế thừa dữ liệu
           cli-compile-flags: |
+            --config-file "./arduino_local_env/arduino-cli.yaml"
             --build-property "build.usb_mode=1"
             --build-property "build.cdc_on_boot=0"
 
@@ -62,6 +68,7 @@ jobs:
           name: ESP32S3_Hybrid_HID_Core_Firmware
           # Đường dẫn quét phủ rộng thu thập mọi file firmware .bin được xuất ra
           path: |
+            ./**/.build/**/*.bin
             /tmp/arduino-cli-sketches-**/*.bin
             /tmp/arduino/sketches/**/build/*.bin
             ./**/build/**/*.bin
