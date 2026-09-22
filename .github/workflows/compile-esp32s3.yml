@@ -15,37 +15,41 @@ jobs:
       - name: Kiểm tra mã nguồn (Checkout)
         uses: actions/checkout@v4
 
-      - name: Thiết lập trình biên dịch Arduino CLI
+      - name: Thiết lập cài đặt Arduino CLI chính thức
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: "latest"
+
+      - name: Cài đặt Core phần cứng ESP32 (Espressif Official)
+        run: |
+          arduino-cli core update-index --additional-urls https://github.io
+          arduino-cli core install esp32:esp32 --additional-urls https://github.io
+
+      - name: Biên dịch mã nguồn và Ép cấu hình phần cứng TinyUSB
         uses: arduino/compile-sketches@v1
         with:
           fqbn: "esp32:esp32:esp32s3"
           
-          # [FIX] Đổi cú pháp khai báo JSON của Espressif thành chuỗi chuỗi trực tiếp để tránh lỗi tải archive format
-          platforms: |
-            - name: "esp32:esp32"
-              source-url: "https://github.io"
-          
-          # Cài đặt tự động thư viện NimBLE-Arduino cho dự án của bạn
+          # Cài đặt tự động thư viện NimBLEDevice bắt buộc cho dự án của bạn
           libraries: |
             - name: "NimBLE-Arduino"
 
-          # [FIX] Thay thế build-properties cũ thành cờ cli-compile-flags để ép cấu hình phần cứng USB TinyUSB
+          # ÉP CẤU HÌNH PHẦN CỨNG: Bật chế độ USB-OTG TinyUSB để bo mạch ESP32-S3 nhận diện làm Chuột/Bàn phím
           cli-compile-flags: |
             --build-property "build.usb_mode=1"
             --build-property "build.cdc_on_boot=0"
 
-          # [FIX] Đổi tên tham số từ sketch-path (số ít) thành sketch-paths (số nhiều) theo đúng quy chuẩn v1
+          # Đường dẫn số nhiều trỏ tới vị trí file .ino của bạn
           sketch-paths: |
             ./
-            
-          verbose: true
 
       - name: Thu thập và đóng gói File .BIN thành phẩm
         uses: actions/upload-artifact@v4
         with:
           name: ESP32S3_Hybrid_HID_Core
-          # Đường dẫn lưu file binary sau khi GitHub Actions biên dịch thành công
+          # Đường dẫn quét chuẩn xác mọi file build .bin được Arduino CLI xuất ra
           path: |
-            /tmp/arduino-cli-sketches-***/*.bin
-            ./build/**/*.bin
-          if-no-files-found: warn
+            /tmp/arduino-cli-sketches-**/*.bin
+            /tmp/arduino/sketches/**/build/*.bin
+            ./**/build/**/*.bin
+          if-no-files-found: error
