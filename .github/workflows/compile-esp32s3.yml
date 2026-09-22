@@ -18,23 +18,28 @@ jobs:
       - name: Thiết lập cài đặt Arduino CLI chính thức
         uses: arduino/setup-arduino-cli@v2
         with:
-          # Khóa cứng phiên bản ổn định tránh lỗi sập API gỡ cài đặt
-          version: "0.35.3" 
+          version: "0.35.3" # Khóa phiên bản CLI ổn định
 
-      - name: Cài đặt Core phần cứng ESP32 (Espressif Official)
+      - name: Cài đặt và Cấu hình Core ESP32 tuần tự (Mẫu chuẩn sạch)
         run: |
-          # [FIX TRIỆT ĐỂ] Gọi cấu hình dọn sạch bộ đệm để xóa sạch địa chỉ lỗi github.io còn sót lại trong hệ thống
-          arduino-cli core update-index --clear-cache --additional-urls https://github.io
+          # 1. Khởi tạo cấu hình mặc định để xóa sạch mọi index lỗi trước đó
+          arduino-cli config init --overwrite
           
-          # Tiến hành cài đặt core phần cứng chính chủ từ Espressif
-          arduino-cli core install esp32:esp32 --additional-urls https://github.io
+          # 2. Thêm duy nhất đường dẫn URL bổ sung của Espressif vào danh sách quản lý
+          arduino-cli config set board_manager.additional_urls https://github.io
+          
+          # 3. Cập nhật chỉ mục index từ nguồn vừa cấu hình
+          arduino-cli core update-index
+          
+          # 4. Tải và cài đặt core phần cứng esp32 bản mới nhất
+          arduino-cli core install esp32:esp32
 
       - name: Biên dịch mã nguồn và Ép cấu hình phần cứng TinyUSB
         uses: arduino/compile-sketches@v1
         with:
           fqbn: "esp32:esp32:esp32s3"
           
-          # Cài đặt tự động thư viện NimBLEDevice bắt buộc cho dự án của bạn
+          # Cài đặt tự động thư viện NimBLEDevice cho dự án
           libraries: |
             - name: "NimBLE-Arduino"
 
@@ -43,7 +48,7 @@ jobs:
             --build-property "build.usb_mode=1"
             --build-property "build.cdc_on_boot=0"
 
-          # Đường dẫn số nhiều trỏ tới vị trí file .ino của bạn
+          # Đường dẫn trỏ tới vị trí file .ino của bạn
           sketch-paths: |
             ./
 
@@ -51,7 +56,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ESP32S3_Hybrid_HID_Core
-          # Đường dẫn quét chuẩn xác mọi file build .bin được Arduino CLI xuất ra
+          # Đường dẫn quét phủ rộng thu thập mọi file firmware .bin được xuất ra
           path: |
             /tmp/arduino-cli-sketches-**/*.bin
             /tmp/arduino/sketches/**/build/*.bin
