@@ -39,7 +39,7 @@ jobs:
       - name: Thu thập và đóng gói File .BIN thành phẩm
         uses: actions/upload-artifact@v4
         with:
-          name: ESP32S3_Hybrid_HID_Core_Firmware
+          name: ESP32S3_Hybrid_HID_Core
           # Đường dẫn mặc định nơi Arduino CLI xuất file binary sau khi biên dịch thành công
           path: |
             ./build/**/*.bin
