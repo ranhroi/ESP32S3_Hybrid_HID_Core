@@ -20,18 +20,22 @@ jobs:
         with:
           version: "0.35.3" # Khóa phiên bản CLI ổn định
 
-      - name: Cài đặt và Cấu hình Core ESP32 tuần tự (Mẫu chuẩn sạch)
+      - name: Tận diệt cấu hình lỗi cũ và Cài đặt Core ESP32 (Mẫu Chuẩn Sạch)
         run: |
-          # 1. Khởi tạo cấu hình mặc định để xóa sạch mọi index lỗi trước đó
+          # [CỰC KỲ QUAN TRỌNG] Xóa cứng cưỡng bức toàn bộ thư mục cấu hình ẩn chứa link github.io lỗi của GitHub runner
+          rm -rf /home/runner/.arduino15/
+          rm -rf ~/.arduino15/
+          
+          # Khởi tạo lại một file cấu hình hệ thống trống hoàn toàn mới
           arduino-cli config init --overwrite
           
-          # 2. Thêm duy nhất đường dẫn URL bổ sung của Espressif vào danh sách quản lý
+          # Nạp duy nhất đường dẫn URL bổ sung của hãng Espressif
           arduino-cli config set board_manager.additional_urls https://github.io
           
-          # 3. Cập nhật chỉ mục index từ nguồn vừa cấu hình
+          # Cập nhật lại toàn bộ chỉ mục index sạch từ đầu
           arduino-cli core update-index
           
-          # 4. Tải và cài đặt core phần cứng esp32 bản mới nhất
+          # Tải và cài đặt lõi phần cứng esp32
           arduino-cli core install esp32:esp32
 
       - name: Biên dịch mã nguồn và Ép cấu hình phần cứng TinyUSB
@@ -39,7 +43,7 @@ jobs:
         with:
           fqbn: "esp32:esp32:esp32s3"
           
-          # Cài đặt tự động thư viện NimBLEDevice cho dự án
+          # Cài đặt tự động thư viện NimBLEDevice cho dự án của bạn
           libraries: |
             - name: "NimBLE-Arduino"
 
@@ -48,8 +52,7 @@ jobs:
             --build-property "build.usb_mode=1"
             --build-property "build.cdc_on_boot=0"
 
-          # [ĐÃ SỬA] Đường dẫn nội bộ trỏ thẳng vào thư mục chứa file .ino của bạn trên Git
-          # Tuyệt đối không dùng link web có chứa "/blob/main/" bạn nhé!
+          # Đường dẫn nội bộ trỏ thẳng vào thư mục chứa file .ino của bạn trên Git
           sketch-paths: |
             ./ESP32S3_Hybrid_HID_Core
 
