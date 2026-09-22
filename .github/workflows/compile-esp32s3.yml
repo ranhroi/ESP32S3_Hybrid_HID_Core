@@ -48,14 +48,15 @@ jobs:
             --build-property "build.usb_mode=1"
             --build-property "build.cdc_on_boot=0"
 
-          # Đường dẫn trỏ tới vị trí file .ino của bạn
+          # [ĐÃ SỬA] Đường dẫn nội bộ trỏ thẳng vào thư mục chứa file .ino của bạn trên Git
+          # Tuyệt đối không dùng link web có chứa "/blob/main/" bạn nhé!
           sketch-paths: |
-            ./
+            ./ESP32S3_Hybrid_HID_Core
 
       - name: Thu thập và đóng gói File .BIN thành phẩm
         uses: actions/upload-artifact@v4
         with:
-          name: ESP32S3_Hybrid_HID_Core
+          name: ESP32S3_Hybrid_HID_Core_Firmware
           # Đường dẫn quét phủ rộng thu thập mọi file firmware .bin được xuất ra
           path: |
             /tmp/arduino-cli-sketches-**/*.bin
