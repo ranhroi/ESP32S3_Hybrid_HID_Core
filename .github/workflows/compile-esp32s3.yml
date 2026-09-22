@@ -18,11 +18,15 @@ jobs:
       - name: Thiết lập cài đặt Arduino CLI chính thức
         uses: arduino/setup-arduino-cli@v2
         with:
-          version: "1.2.2"
+          # Khóa cứng phiên bản ổn định tránh lỗi sập API gỡ cài đặt
+          version: "0.35.3" 
 
       - name: Cài đặt Core phần cứng ESP32 (Espressif Official)
         run: |
-          arduino-cli core update-index --additional-urls https://github.io
+          # [FIX TRIỆT ĐỂ] Gọi cấu hình dọn sạch bộ đệm để xóa sạch địa chỉ lỗi github.io còn sót lại trong hệ thống
+          arduino-cli core update-index --clear-cache --additional-urls https://github.io
+          
+          # Tiến hành cài đặt core phần cứng chính chủ từ Espressif
           arduino-cli core install esp32:esp32 --additional-urls https://github.io
 
       - name: Biên dịch mã nguồn và Ép cấu hình phần cứng TinyUSB
