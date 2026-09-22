@@ -1,43 +1,46 @@
-name: Compile ESP32-S3 Hybrid HID Core
+name: Biên dịch ESP32-S3 Hybrid Core sang File BIN
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Cho phép bấm nút chạy thủ công trên GitHub
 
 jobs:
   compile:
-    name: Build firmware for ESP32-S3
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Kiểm tra mã nguồn (Checkout)
         uses: actions/checkout@v4
 
-      - name: Compile Arduino Sketch
+      - name: Thiết lập trình biên dịch Arduino CLI
         uses: arduino/compile-sketches@v1
         with:
-          fqbn: esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashMode=qio,FlashSize=4M
+          fqbn: "esp32:esp32:esp32s3"
           platforms: |
-            - name: esp32:esp32
-              version: "2.0.14"
-              source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            # Sử dụng nguồn quản lý platform chính thức và phiên bản mới nhất từ Espressif
+            - name: "esp32:esp32"
+              source-url: "https://github.io"
+          
+          # Cài đặt tự động thư viện NimBLEDevice bắt buộc cho dự án của bạn
           libraries: |
-            - name: NimBLE-Arduino
-          sketch-paths: |
-            - .
-          cli-compile-flags: |
-            --output-dir ${{ runner.temp }}/output
-            --export-binaries
+            - name: "NimBLE-Arduino"
 
-      - name: List output files
-        run: ls -la ${{ runner.temp }}/output/ || true
+          # ÉP CẤU HÌNH PHẦN CỨNG: Bật chế độ USB-OTG TinyUSB để bo mạch ESP32-S3 nhận diện làm Chuột/Bàn phím
+          build-properties: |
+            build.usb_mode=1
+            build.cdc_on_boot=0
 
-      - name: Upload compiled firmware
+          # Đường dẫn tới thư mục chứa file .ino của bạn (đổi tên nếu thư mục của bạn đặt tên khác)
+          sketch-path: "./"
+
+      - name: Thu thập và đóng gói File .BIN thành phẩm
         uses: actions/upload-artifact@v4
         with:
-          name: esp32s3-hybrid-hid-firmware
-          path: ${{ runner.temp }}/output/*.bin
-          if-no-files-found: error
+          name: ESP32S3_Hybrid_HID_Core_Firmware
+          # Đường dẫn mặc định nơi Arduino CLI xuất file binary sau khi biên dịch thành công
+          path: |
+            ./build/**/*.bin
+          retention-days: 7 # Lưu trữ file trên GitHub trong vòng 7 ngày để bạn tải về
