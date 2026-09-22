@@ -19,28 +19,33 @@ jobs:
         uses: arduino/compile-sketches@v1
         with:
           fqbn: "esp32:esp32:esp32s3"
+          
+          # [FIX] Đổi cú pháp khai báo JSON của Espressif thành chuỗi chuỗi trực tiếp để tránh lỗi tải archive format
           platforms: |
-            # Sử dụng nguồn quản lý platform chính thức và phiên bản mới nhất từ Espressif
             - name: "esp32:esp32"
               source-url: "https://github.io"
           
-          # Cài đặt tự động thư viện NimBLEDevice bắt buộc cho dự án của bạn
+          # Cài đặt tự động thư viện NimBLE-Arduino cho dự án của bạn
           libraries: |
             - name: "NimBLE-Arduino"
 
-          # ÉP CẤU HÌNH PHẦN CỨNG: Bật chế độ USB-OTG TinyUSB để bo mạch ESP32-S3 nhận diện làm Chuột/Bàn phím
-          build-properties: |
-            build.usb_mode=1
-            build.cdc_on_boot=0
+          # [FIX] Thay thế build-properties cũ thành cờ cli-compile-flags để ép cấu hình phần cứng USB TinyUSB
+          cli-compile-flags: |
+            --build-property "build.usb_mode=1"
+            --build-property "build.cdc_on_boot=0"
 
-          # Đường dẫn tới thư mục chứa file .ino của bạn (đổi tên nếu thư mục của bạn đặt tên khác)
-          sketch-path: "./"
+          # [FIX] Đổi tên tham số từ sketch-path (số ít) thành sketch-paths (số nhiều) theo đúng quy chuẩn v1
+          sketch-paths: |
+            ./
+            
+          verbose: true
 
       - name: Thu thập và đóng gói File .BIN thành phẩm
         uses: actions/upload-artifact@v4
         with:
           name: ESP32S3_Hybrid_HID_Core
-          # Đường dẫn mặc định nơi Arduino CLI xuất file binary sau khi biên dịch thành công
+          # Đường dẫn lưu file binary sau khi GitHub Actions biên dịch thành công
           path: |
+            /tmp/arduino-cli-sketches-***/*.bin
             ./build/**/*.bin
-          retention-days: 7 # Lưu trữ file trên GitHub trong vòng 7 ngày để bạn tải về
+          if-no-files-found: warn
