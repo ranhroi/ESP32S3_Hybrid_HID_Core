@@ -11,10 +11,6 @@ jobs:
   compile:
     name: Build firmware for ESP32-S3
     runs-on: ubuntu-latest
-    
-    env:
-      BINARY_FILENAME: ESP32S3_Hybrid_HID_Core.ino.bin
-      BINARY_ARTIFACT_NAME: esp32s3-hybrid-hid
 
     steps:
       - name: Checkout repository
@@ -23,33 +19,33 @@ jobs:
       - name: Compile Arduino Sketch
         uses: arduino/compile-sketches@v1
         with:
-          # FQBN cho ESP32-S3 với USB-OTG
-          fqbn: esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashMode=qio,FlashSize=4M,PartitionScheme=default
+          # ✅ FQBN đầy đủ với USB Mode cho ESP32-S3
+          fqbn: esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashMode=qio,FlashSize=4M
           
-          # Cài đặt gói board ESP32 từ Espressif
+          # ✅ Chỉ định version core ESP32
           platforms: |
             - name: esp32:esp32
+              version: "2.0.14"
               source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           
-          # Cài đặt thư viện cần thiết
+          # ✅ Chỉ định version NimBLE-Arduino 2.x
           libraries: |
             - name: NimBLE-Arduino
+              version: "^2.1.0"
           
-          # Đường dẫn sketch (file .ino ở thư mục gốc)
           sketch-paths: |
             - .
           
-          # Xuất file .bin ra thư mục output
           cli-compile-flags: |
             --output-dir ${{ runner.temp }}/output
             --export-binaries
 
       - name: List output files
-        run: ls -la ${{ runner.temp }}/output/
+        run: ls -la ${{ runner.temp }}/output/ || true
 
       - name: Upload compiled firmware
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BINARY_ARTIFACT_NAME }}
+          name: esp32s3-hybrid-hid-firmware
           path: ${{ runner.temp }}/output/*.bin
           if-no-files-found: error
