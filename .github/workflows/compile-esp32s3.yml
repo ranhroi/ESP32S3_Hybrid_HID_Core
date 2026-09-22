@@ -1,0 +1,55 @@
+name: Compile ESP32-S3 Hybrid HID Core
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: Build firmware for ESP32-S3
+    runs-on: ubuntu-latest
+    
+    env:
+      BINARY_FILENAME: ESP32S3_Hybrid_HID_Core.ino.bin
+      BINARY_ARTIFACT_NAME: esp32s3-hybrid-hid
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile Arduino Sketch
+        uses: arduino/compile-sketches@v1
+        with:
+          # FQBN cho ESP32-S3 với USB-OTG
+          fqbn: esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashMode=qio,FlashSize=4M,PartitionScheme=default
+          
+          # Cài đặt gói board ESP32 từ Espressif
+          platforms: |
+            - name: esp32:esp32
+              source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          
+          # Cài đặt thư viện cần thiết
+          libraries: |
+            - name: NimBLE-Arduino
+          
+          # Đường dẫn sketch (file .ino ở thư mục gốc)
+          sketch-paths: |
+            - .
+          
+          # Xuất file .bin ra thư mục output
+          cli-compile-flags: |
+            --output-dir ${{ runner.temp }}/output
+            --export-binaries
+
+      - name: List output files
+        run: ls -la ${{ runner.temp }}/output/
+
+      - name: Upload compiled firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/output/*.bin
+          if-no-files-found: error
