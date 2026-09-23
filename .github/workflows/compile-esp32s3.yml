@@ -1,75 +1,39 @@
-name: Biên dịch ESP32-S3 Hybrid Core sang File BIN
+name: Compile ESP32-S3 Hybrid HID Core
 
 on:
   push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch: # Cho phép bấm nút chạy thủ công trên GitHub
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   compile:
+    name: Build firmware for ESP32-S3
     runs-on: ubuntu-latest
 
     steps:
-      - name: Kiểm tra mã nguồn (Checkout)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Thiết lập cài đặt Arduino CLI chính thức
-        uses: arduino/setup-arduino-cli@v2
-        with:
-          version: "0.35.3" # Khóa phiên bản CLI ổn định
-
-      - name: Cài đặt Core phần cứng ESP32 Độc quyền Cục bộ (Fix Lỗi Sập URL)
-        run: |
-          # 1. Tạo một thư mục sạch cục bộ riêng trong Workspace của dự án để làm nơi chứa dữ liệu mới
-          mkdir -p ./arduino_local_env/data
-          mkdir -p ./arduino_local_env/downloads
-          
-          # 2. Ép khởi tạo một file cấu hình cục bộ riêng biệt biệt lập hoàn toàn
-          arduino-cli config init --overwrite --config-file ./arduino_local_env/arduino-cli.yaml
-          
-          # 3. Cấu hình các đường dẫn lưu trữ trỏ hết vào thư mục cục bộ sạch vừa tạo, ngắt kết nối khỏi hệ thống ẩn của GitHub Runner
-          arduino-cli config set directories.data ./arduino_local_env/data --config-file ./arduino_local_env/arduino-cli.yaml
-          arduino-cli config set directories.downloads ./arduino_local_env/downloads --config-file ./arduino_local_env/arduino-cli.yaml
-          
-          # 4. Ép ghi duy nhất một URL index chính chủ của hãng Espressif vào file cấu hình riêng này
-          arduino-cli config set board_manager.additional_urls https://github.io --config-file ./arduino_local_env/arduino-cli.yaml
-          
-          # 5. Gọi cập nhật chỉ mục index bằng cách ép sử dụng file cấu hình sạch vừa tạo
-          arduino-cli core update-index --config-file ./arduino_local_env/arduino-cli.yaml
-          
-          # 6. Tải và cài đặt lõi phần cứng esp32 vào môi trường cục bộ riêng biệt
-          arduino-cli core install esp32:esp32 --config-file ./arduino_local_env/arduino-cli.yaml
-
-      - name: Biên dịch mã nguồn và Ép cấu hình phần cứng TinyUSB
+      - name: Compile Arduino Sketch
         uses: arduino/compile-sketches@v1
         with:
-          fqbn: "esp32:esp32:esp32s3"
-          
-          # Cài đặt tự động thư viện NimBLEDevice cho dự án của bạn
+          # ✅ Core 3.x — có USBHIDConsumerControl
+          fqbn: esp32:esp32:esp32s3
+          platforms: |
+            - name: esp32:esp32
+              version: "3.0.7"
+              source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          # ✅ NimBLE bản mới nhất (2.x)
           libraries: |
-            - name: "NimBLE-Arduino"
-
-          # ÉP CẤU HÌNH PHẦN CỨNG: Bật chế độ USB-OTG TinyUSB để bo mạch ESP32-S3 nhận diện làm Chuột/Bàn phím
-          # Đồng thời truyền file cấu hình sạch cục bộ sang cho bước biên dịch kế thừa dữ liệu
-          cli-compile-flags: |
-            --config-file "./arduino_local_env/arduino-cli.yaml"
-            --build-property "build.usb_mode=1"
-            --build-property "build.cdc_on_boot=0"
-
-          # Đường dẫn nội bộ trỏ thẳng vào thư mục chứa file .ino của bạn trên Git
+            - name: NimBLE-Arduino
           sketch-paths: |
-            ./ESP32S3_Hybrid_HID_Core
+            - .
+          cli-compile-flags: |
+            --output-dir ${{ runner.temp }}/output
+            --export-binaries
 
-      - name: Thu thập và đóng gói File .BIN thành phẩm
+      - name: Upload compiled firmware
         uses: actions/upload-artifact@v4
         with:
-          name: ESP32S3_Hybrid_HID_Core_Firmware
-          # Đường dẫn quét phủ rộng thu thập mọi file firmware .bin được xuất ra
-          path: |
-            ./**/.build/**/*.bin
-            /tmp/arduino-cli-sketches-**/*.bin
-            /tmp/arduino/sketches/**/build/*.bin
-            ./**/build/**/*.bin
-          if-no-files-found: error
+          name: esp32s3-hybrid-hid-firmware
+          path: ${{ runner.temp }}/output/*.bin
