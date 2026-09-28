@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-S3 HID Config</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:linear-gradient(135deg,#0f0f0f 0%,#1e1e1e 100%);color:#e0e0e0;
+min-height:100vh;padding:16px}
+.container{max-width:520px;margin:0 auto}
+.header{text-align:center;padding:20px 0}
+.header h1{color:#00e5ff;font-size:20px;margin-bottom:4px}
+.header p{color:#888;font-size:12px}
+.tabs{display:flex;gap:4px;margin-bottom:16px;background:#1a1a1a;
+padding:4px;border-radius:12px;overflow-x:auto}
+.tab{flex:1;padding:10px 8px;text-align:center;font-size:12px;
+font-weight:600;color:#888;border-radius:8px;cursor:pointer;
+white-space:nowrap;transition:all .2s}
+.tab.active{background:#00e5ff;color:#000}
+.card{background:#1a1a1a;border-radius:16px;padding:20px;margin-bottom:12px;
+border:1px solid #2a2a2a}
+.card h2{color:#00e5ff;font-size:14px;margin-bottom:14px;
+text-transform:uppercase;letter-spacing:.5px}
+label{display:block;font-size:11px;color:#00e5ff;margin-bottom:6px;
+margin-top:12px;font-weight:600;letter-spacing:.3px}
+label:first-child{margin-top:0}
+input,select{width:100%;padding:10px 12px;border-radius:8px;
+border:1px solid #333;background:#0f0f0f;color:#e0e0e0;
+font-size:13px;outline:none;font-family:inherit}
+input:focus,select:focus{border-color:#00e5ff}
+.btn{width:100%;padding:12px;margin-top:16px;border:none;
+border-radius:8px;background:linear-gradient(135deg,#00e5ff,#00b8cc);
+color:#000;font-size:13px;font-weight:700;cursor:pointer}
+.btn:active{transform:scale(.98)}
+.btn.danger{background:linear-gradient(135deg,#ff4444,#cc0000);color:#fff}
+.btn.secondary{background:#2a2a2a;color:#00e5ff;border:1px solid #00e5ff}
+.btn.exit{background:linear-gradient(135deg,#ffaa00,#cc8800);color:#000;
+margin-top:0;padding:14px;font-size:14px}
+.btn.toggle{background:transparent;color:#888;border:1px dashed #444;
+margin-top:12px;padding:8px;font-size:12px;font-weight:500}
+.btn.toggle:hover{color:#00e5ff;border-color:#00e5ff}
+.btn.secondary.active{background:linear-gradient(135deg,#00e5ff,#00b8cc);
+color:#000;border-color:#00e5ff;font-weight:700}
+.btn.secondary.active::before{content:"✓ "}
+.btn.secondary:disabled{opacity:0.8;cursor:not-allowed}
+.status-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.status-item{background:#0f0f0f;padding:10px;border-radius:8px;
+border:1px solid #2a2a2a}
+.status-label{font-size:10px;color:#888;text-transform:uppercase}
+.status-value{font-size:13px;color:#00e5ff;font-weight:600;
+margin-top:4px;word-break:break-all}
+.footer{text-align:center;color:#555;font-size:10px;margin-top:20px}
+.mode-badge{display:inline-block;padding:4px 10px;border-radius:12px;
+font-size:11px;font-weight:700;background:#00e5ff;color:#000}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+background:#00e5ff;color:#000;padding:10px 20px;border-radius:8px;
+font-size:12px;font-weight:600;opacity:0;transition:opacity .3s;
+pointer-events:none;z-index:9999}
+.toast.show{opacity:1}
+.hint{font-size:11px;color:#888;margin-top:8px;line-height:1.5}
+.hint b{color:#00e5ff}
+.advanced-options{max-height:0;overflow:hidden;
+transition:max-height .3s ease-out;margin-top:0}
+.advanced-options.show{max-height:500px;margin-top:8px}
+.divider{height:1px;background:#2a2a2a;margin:12px 0}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header">
+<h1>⚙️ ESP32-S3 HID Config</h1>
+<p>Trung tâm cấu hình Hybrid HID</p>
+</div>
+
+<div class="tabs">
+<div class="tab active" onclick="showTab('status', event)">📊 Trạng thái</div>
+<div class="tab" onclick="showTab('wifi', event)">📡 Wi-Fi</div>
+<div class="tab" onclick="showTab('ble', event)">📶 Bluetooth</div>
+<div class="tab" onclick="showTab('tcp', event)">🔌 TCP</div>
+</div>
+
+<!-- TAB STATUS -->
+<div id="tab-status" class="tab-content">
+<div class="card">
+<h2>Trạng thái hiện tại</h2>
+<div class="status-grid">
+<div class="status-item"><div class="status-label">Mode</div>
+<div class="status-value"><span class="mode-badge">%MODE%</span></div></div>
+<div class="status-item"><div class="status-label">IP</div>
+<div class="status-value">%IP%</div></div>
+<div class="status-item"><div class="status-label">BLE Name</div>
+<div class="status-value">%BLE_NAME%</div></div>
+<div class="status-item"><div class="status-label">TCP Port</div>
+<div class="status-value">%TCP_PORT%</div></div>
+</div>
+</div>
+
+<div class="card">
+<h2>🚪 Kết nối tiếp theo</h2>
+<p class="hint">
+Board sẽ tự động chuyển sang mode phù hợp:<br>
+• <b>Wi-Fi STA</b> nếu đã lưu Wi-Fi<br>
+• <b>Bluetooth</b> nếu chưa lưu Wi-Fi
+</p>
+<button class="btn exit" onclick="exitSetup()">🚪 Ngắt kết nối và thoát</button>
+
+<button class="btn toggle" onclick="toggleAdvanced()" id="toggleBtn">
+  ▼ Hiện tùy chọn chuyển mode
+</button>
+
+<div class="advanced-options" id="advancedOptions">
+  <div class="divider"></div>
+  <p class="hint" style="margin-bottom:12px">
+    ⚠️ <b>Cảnh báo:</b> Chuyển mode sẽ ngắt kết nối hiện tại.
+  </p>
+  <button class="btn secondary" id="btn-mode-0" onclick="switchMode('ble')">
+    📶 Chuyển sang BLUETOOTH
+  </button>
+  <button class="btn secondary" id="btn-mode-1" onclick="switchMode('wifi')">
+    📡 Chuyển sang WI-FI STA
+  </button>
+  <button class="btn secondary" id="btn-mode-2" onclick="switchMode('setup')">
+    🔧 Chuyển sang SETUP
+  </button>
+</div>
+</div>
+
+<div class="card">
+<h2>⚠️ Nguy hiểm</h2>
+<button class="btn danger" onclick="factoryReset()">⚠️ FACTORY RESET</button>
+</div>
+</div>
+
+<!-- TAB WIFI -->
+<div id="tab-wifi" class="tab-content" style="display:none">
+<div class="card">
+<h2>Wi-Fi đã lưu</h2>
+<div class="status-item"><div class="status-label">SSID hiện tại</div>
+<div class="status-value">%WIFI_SSID%</div></div>
+</div>
+<div class="card">
+<h2>Cấu hình Wi-Fi mới</h2>
+<form action="/save/wifi" method="POST">
+<label>CHỌN MẠNG WI-FI</label>
+<select name="ssid">
+<option value="">-- Chọn Wi-Fi --</option>
+%WIFI_OPTIONS%
+</select>
+<label>HOẶC NHẬP TÊN WI-FI ẨN</label>
+<input type="text" name="ssid_manual" placeholder="Nhập SSID nếu Wi-Fi ẩn">
+<label>MẬT KHẨU WI-FI</label>
+<input type="password" name="password" placeholder="Nhập mật khẩu">
+<button class="btn" type="submit">💾 LƯU WI-FI</button>
+</form>
+<p class="hint">Sau khi lưu, vào tab <b>Trạng thái</b> để áp dụng.</p>
+</div>
+<div class="card">
+<h2>Phát Wi-Fi (SoftAP)</h2>
+<form action="/save/ap" method="POST">
+<label>TÊN AP</label>
+<input type="text" name="ap_ssid" value="%AP_SSID%" placeholder="ESP32S3_HID_Setup">
+<label>MẬT KHẨU AP (để trống = không khóa)</label>
+<input type="password" name="ap_pass" value="%AP_PASS%" placeholder="Để trống nếu không khóa">
+<button class="btn" type="submit">💾 LƯU AP CONFIG</button>
+</form>
+<p class="hint">AP config mới sẽ áp dụng sau khi <b>Ngắt kết nối và thoát</b>.</p>
+</div>
+</div>
+
+<!-- TAB BLE -->
+<div id="tab-ble" class="tab-content" style="display:none">
+<div class="card">
+<h2>Cấu hình Bluetooth</h2>
+<form action="/save/ble" method="POST">
+<label>TÊN THIẾT BỊ BLE</label>
+<input type="text" name="ble_name" value="%BLE_NAME%" placeholder="ESP32S3_HID_REMOTE">
+<label>UUID PREFIX (4 ký tự hex)</label>
+<input type="text" name="ble_uuid_prefix" value="%UUID_PREFIX%" maxlength="4" placeholder="2D2A">
+<p style="font-size:10px;color:#666;margin-top:6px">
+UUID đầy đủ: %UUID_PREFIX%0001-8A5A-4E76-A2E3-1E57D9A1B001
+</p>
+<button class="btn" type="submit">💾 LƯU CẤU HÌNH BLE</button>
+</form>
+<p class="hint">Sau khi lưu, vào tab <b>Trạng thái</b> để áp dụng.</p>
+</div>
+</div>
+
+<!-- TAB TCP -->
+<div id="tab-tcp" class="tab-content" style="display:none">
+<div class="card">
+<h2>Cấu hình TCP Server</h2>
+<form action="/save/tcp" method="POST">
+<label>PORT TCP (1024-65535)</label>
+<input type="number" name="tcp_port" value="%TCP_PORT%" min="1024" max="65535">
+<label>MẬT KHẨU HỆ THỐNG</label>
+<input type="text" name="sys_password" value="%SYS_PASSWORD%" placeholder="123456">
+<p style="font-size:10px;color:#666;margin-top:6px">
+Mật khẩu dùng cho cả BLE và Wi-Fi TCP auth.
+</p>
+<button class="btn" type="submit">💾 LƯU CẤU HÌNH TCP</button>
+</form>
+<p class="hint">Sau khi lưu, vào tab <b>Trạng thái</b> để áp dụng.</p>
+</div>
+</div>
+
+<div class="footer">ESP32-S3 HID Remote · v4.1 · Hybrid Config Hub</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================================================
+// TAB SWITCHING
+// ============================================================
+function showTab(name, ev) {
+  document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).style.display = 'block';
+  if (ev && ev.target) ev.target.classList.add('active');
+}
+
+// ============================================================
+// HIGHLIGHT MODE HIỆN TẠI (AN TOÀN)
+// ============================================================
+(function highlightCurrentMode() {
+  try {
+    // %MODE_ID% được bọc trong dấu ngoặc kép → tránh lỗi cú pháp
+    // Nếu firmware chưa thay → HTML vẫn có "%MODE_ID%" → JavaScript chạy bình thường
+    const modeStr = "%MODE_ID%";
+    const currentMode = parseInt(modeStr);
+    
+    console.log('[Config] Mode string:', modeStr, '→ parsed:', currentMode);
+    
+    if (isNaN(currentMode)) {
+      console.warn('[Config] %MODE_ID% chưa được firmware thay thế');
+      return;
+    }
+    
+    document.querySelectorAll('.btn.secondary').forEach(btn => {
+      btn.classList.remove('active');
+      btn.disabled = false;
+    });
+    
+    const activeBtn = document.getElementById('btn-mode-' + currentMode);
+    if (activeBtn) {
+      activeBtn.classList.add('active');
+      activeBtn.disabled = true;
+      console.log('[Config] ✅ Highlighted mode:', currentMode);
+    } else {
+      console.warn('[Config] Button not found for mode:', currentMode);
+    }
+  } catch (e) {
+    console.error('[Config] Highlight error:', e);
+  }
+})();
+
+// ============================================================
+// TOGGLE HIỆN/ẨN TÙY CHỌN
+// ============================================================
+let advancedVisible = false;
+function toggleAdvanced() {
+  const panel = document.getElementById('advancedOptions');
+  const btn = document.getElementById('toggleBtn');
+  advancedVisible = !advancedVisible;
+  
+  if (advancedVisible) {
+    panel.classList.add('show');
+    btn.textContent = '▲ Ẩn tùy chọn chuyển mode';
+  } else {
+    panel.classList.remove('show');
+    btn.textContent = '▼ Hiện tùy chọn chuyển mode';
+  }
+}
+
+// ============================================================
+// CHUYỂN MODE THỦ CÔNG
+// ============================================================
+function switchMode(mode) {
+  if (!confirm('Chuyển sang mode ' + mode.toUpperCase() + '?\n\nKết nối hiện tại sẽ bị ngắt.')) return;
+
+  console.log('[Config] Switching to mode:', mode);
+
+  fetch('/api/switch?mode=' + mode, {method:'POST'})
+    .then(r => r.text())
+    .then(t => {
+      console.log('[Config] Switch response:', t);
+      showToast('Đã gửi lệnh chuyển mode: ' + mode.toUpperCase());
+    })
+    .catch(e => {
+      console.error('[Config] Switch error:', e);
+      showToast('Lỗi: ' + e.message);
+    });
+}
+
+// ============================================================
+// NGẮT KẾT NỐI VÀ THOÁT
+// ============================================================
+function exitSetup() {
+  if (!confirm('Ngắt kết nối cấu hình và chuyển sang mode hoạt động?\n\nBoard sẽ tự động chọn Wi-Fi hoặc Bluetooth.')) return;
+
+  console.log('[Config] Exit setup requested');
+
+  fetch('/api/exit-setup', {method:'POST'})
+    .then(r => r.text())
+    .then(t => {
+      console.log('[Config] Exit response:', t);
+      showToast('Đã gửi lệnh thoát. Board chuyển mode sau 2 giây...');
+    })
+    .catch(e => {
+      console.error('[Config] Exit error:', e);
+      showToast('Lỗi: ' + e.message);
+    });
+}
+
+// ============================================================
+// FACTORY RESET
+// ============================================================
+function factoryReset() {
+  if (!confirm('XÓA TOÀN BỘ cấu hình? Board sẽ về SETUP mode.')) return;
+  
+  console.log('[Config] Factory reset requested');
+  
+  fetch('/api/factory-reset', {method:'POST'})
+    .then(r => r.text())
+    .then(t => { 
+      console.log('[Config] Factory reset response:', t);
+      showToast('Đã factory reset'); 
+    })
+    .catch(e => {
+      console.error('[Config] Factory reset error:', e);
+    });
+}
+
+// ============================================================
+// TOAST
+// ============================================================
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+console.log('[Config] Script loaded successfully');
+</script>
+</body>
+</html>
