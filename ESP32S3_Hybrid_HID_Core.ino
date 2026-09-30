@@ -1,5 +1,5 @@
 /**
- * ESP32-S3 Hybrid HID Core v4.1
+ * ESP32-S3 Hybrid HID Core v4.2 - Mouse/Keyboard Realtime Optimized
  * 
  * MÔ HÌNH 3 MODE TÁCH BIỆT:
  *   MODE_BLE   (0) — Chỉ BLE GATT
@@ -13,10 +13,23 @@
  *   - Nút BOOT giữ 3s → vào MODE_SETUP (dự phòng)
  *   - Cứu hộ tự tắt sau khi lưu Wi-Fi
  * 
- * POWER CONTROL: Keyboard shortcut (Windows/Mac/Linux)
+ * SYSTEM ACTIONS: xử lý hoàn toàn ở tầng server bằng HID Consumer Control chuẩn.
+ *   - POWER   → System Power Down (Consumer 0x0081)
+ *   - SLEEP   → System Sleep (Consumer 0x0082)
+ *   - WAKE    → System Wake Up (Consumer 0x0083)
+ *   - RESTART → System Cold Restart (Consumer 0x008E)
+ *   - RELOAD  → AC Refresh (Consumer 0x0227)
+ * Không dùng các keyboard shortcut phụ thuộc Windows.
  * 
  * Bo mạch: ESP32-S3 Dev Module
  * USB Mode: USB-OTG (TinyUSB)
+ *
+ * REALTIME FIX v1:
+ *   - Mouse move/scroll: direct fast path, no generic queue/task.
+ *   - Keyboard/consumer/system: dedicated KeyboardTask + fixed queue.
+ *   - Wi-Fi TCP: fixed ring buffer, no per-frame memmove.
+ *   - BLE: HID frames dispatched directly from BLE write callback.
+ *   - No heap allocation in the HID hot path.
  */
 
 #include <Arduino.h>
@@ -34,6 +47,7 @@
 #include "USBHIDKeyboard.h"
 #include "USBHIDMouse.h"
 #include "USBHIDConsumerControl.h"
+#include "class/hid/hid.h"
 
 // ==========================================
 // 0. NÚT BOOT DỰ PHÒNG
@@ -105,12 +119,29 @@ const int MAX_WIFI_FAIL = 2;
 // ==========================================
 // 2. QUEUE
 // ==========================================
-struct Packet {
-  uint8_t data[64];
-  size_t length;
+// Realtime architecture:
+// - No generic HID packet queue on the hot path.
+// - Wi-Fi TCP and BLE feed the same frame parser directly.
+// - Mouse move/scroll are dispatched immediately.
+// - Keyboard/consumer/system actions are serialized through a dedicated queue.
+struct KeyboardEvent {
+  uint8_t type;
+  uint8_t a;
+  uint8_t b;
+  uint16_t usage;
 };
-QueueHandle_t packetQueue = nullptr;
-TaskHandle_t parserTaskHandle = NULL;
+
+static const uint8_t KBEV_SET_MODIFIERS = 1;
+static const uint8_t KBEV_KEY_DOWN      = 2;
+static const uint8_t KBEV_KEY_UP        = 3;
+static const uint8_t KBEV_KEY_TAP       = 4;
+static const uint8_t KBEV_CONSUMER_TAP  = 5;
+static const uint8_t KBEV_CONSUMER_DOWN = 6;
+static const uint8_t KBEV_CONSUMER_UP   = 7;
+static const uint8_t KBEV_SYSTEM_ACTION = 8;
+
+QueueHandle_t keyboardQueue = nullptr;
+TaskHandle_t keyboardTaskHandle = nullptr;
 
 // ==========================================
 // 3. MÃ GIAO THỨC
@@ -137,6 +168,7 @@ static const uint8_t CMD_KEY = 0x01;
 static const uint8_t CMD_MOUSE_MOVE = 0x02;
 static const uint8_t CMD_MOUSE_CLICK = 0x03;
 static const uint8_t CMD_MOUSE_SCROLL = 0x04;
+static const uint8_t CMD_SYSTEM_ACTION = 0x05; // [cmd, action, 0]
 
 // ---- v2: TLV ----
 static const uint8_t V2_MAGIC = 0xAA;
@@ -153,6 +185,21 @@ static const uint8_t V2_MOUSE_UP = 0x14;
 static const uint8_t V2_CONSUMER_TAP = 0x20;
 static const uint8_t V2_CONSUMER_DOWN = 0x21;
 static const uint8_t V2_CONSUMER_UP = 0x22;
+
+// Server-side system actions. These are NOT keyboard keycodes.
+static const uint8_t V2_SYSTEM_ACTION = 0x30;
+static const uint8_t SYSTEM_ACTION_POWER = 0x01;
+static const uint8_t SYSTEM_ACTION_SLEEP = 0x02;
+static const uint8_t SYSTEM_ACTION_WAKE = 0x03;
+static const uint8_t SYSTEM_ACTION_RESTART = 0x04;
+static const uint8_t SYSTEM_ACTION_RELOAD = 0x05;
+
+// USB HID Consumer/System usages.
+static const uint16_t HID_SYSTEM_POWER_DOWN = 0x0081;
+static const uint16_t HID_SYSTEM_SLEEP = 0x0082;
+static const uint16_t HID_SYSTEM_WAKE_UP = 0x0083;
+static const uint16_t HID_SYSTEM_COLD_RESTART = 0x008E;
+static const uint16_t HID_AC_REFRESH = 0x0227;
 
 // ==========================================
 // 4. UUID BLE ĐỘNG
@@ -200,6 +247,8 @@ void startTcpServer();
 void stopTcpServer();
 void checkBootButton();
 void handleApiExitSetup();
+static void resetWifiRxBuffer();
+static void feedWifiStream(const uint8_t* data, size_t length);
 
 // ==========================================
 // 5. BẢN ĐỒ MÃ HID
@@ -290,6 +339,20 @@ const uint8_t KB_F12 = 0x45;
 // ==========================================
 // 6. TẦNG DRIVER HID
 // ==========================================
+static bool waitUsbReady(uint32_t timeoutMs = 20) {
+  uint32_t start = millis();
+  while (!tud_hid_ready()) {
+    if (millis() - start >= timeoutMs) return false;
+    delay(1);
+  }
+  return true;
+}
+
+static bool hidReadyOrRetry() {
+  if (tud_hid_ready()) return true;
+  return waitUsbReady(20);
+}
+
 static void setModifiers(uint8_t newMask) {
   uint8_t diff = gModifiersMask ^ newMask;
   if (!diff) return;
@@ -304,12 +367,20 @@ static void setModifiers(uint8_t newMask) {
 
 static void keyDown(uint8_t keycode) {
   if (keycode == 0x00 || gKeysDown[keycode]) return;
+  if (!hidReadyOrRetry()) {
+    Serial.printf("[USB] HID not ready -> skip KEY_DOWN 0x%02X\\n", keycode);
+    return;
+  }
   Keyboard.pressRaw(keycode);
   gKeysDown[keycode] = true;
 }
 
 static void keyUp(uint8_t keycode) {
   if (keycode == 0x00 || !gKeysDown[keycode]) return;
+  if (!hidReadyOrRetry()) {
+    Serial.printf("[USB] HID not ready -> keep KEY_DOWN state for 0x%02X\\n", keycode);
+    return;
+  }
   Keyboard.releaseRaw(keycode);
   gKeysDown[keycode] = false;
 }
@@ -348,8 +419,8 @@ static void sendMouseScroll(int8_t dx, int8_t dy) {
 // 6b. SMART KEY TAP — Mảng lookup
 // ==========================================
 static const uint8_t CONSUMER_KEYS[] = {
-  0x30, 0x32, 0x83, 0xE2, 0xE9, 0xEA, 0xCD, 0xB5,
-  0xB6, 0xB7, 0xB3, 0xB4, 0x6F, 0x70, 0x9E, 0x76
+  0xE2, 0xE9, 0xEA, 0xCD, 0xB5, 0xB6, 0xB7,
+  0xB3, 0xB4, 0x6F, 0x70, 0x76
 };
 static const size_t CONSUMER_KEYS_COUNT = sizeof(CONSUMER_KEYS) / sizeof(CONSUMER_KEYS[0]);
 
@@ -361,57 +432,53 @@ static bool isConsumerKey(uint8_t k) {
 }
 
 // ==========================================
-// 6d. POWER CONTROL — Keyboard Shortcut (Windows/Mac/Linux)
+// 6d. SERVER-SIDE SYSTEM ACTIONS
 // ==========================================
-static void handlePowerControl(uint8_t keycode) {
-  switch (keycode) {
-    // ---- POWER DOWN ----
-    case 0x30:
-      {
-        Serial.println("[POWER] Shutdown");
+// The phone sends only a small action ID.
+// ESP32 translates it to a standard HID Consumer/System usage.
+// This keeps OS-specific keyboard shortcuts out of the phone protocol.
+static bool sendSystemAction(uint8_t action) {
+  uint16_t usage = 0;
 
-        // ✅ Windows: Win + X → U → U
-        keyTap(MOD_LEFT_GUI, KB_X);
-        delay(300);
-        keyTap(MOD_NONE, KB_U);
-        delay(100);
-        keyTap(MOD_NONE, KB_U);
+  switch (action) {
+    case SYSTEM_ACTION_POWER:
+      usage = HID_SYSTEM_POWER_DOWN;
+      break;
 
-        // ✅ macOS: Ctrl + Opt + Cmd + Power (không có phím tắt chuẩn)
-        // ✅ Linux: Ctrl + Alt + Del hoặc lệnh riêng
-        // → Không thể hoạt động trên tất cả OS với 1 phím
-        // → Dùng cách phổ biến nhất: Win + X → U → U (Windows)
-        return;
-      }
+    case SYSTEM_ACTION_SLEEP:
+      usage = HID_SYSTEM_SLEEP;
+      break;
 
-    // ---- SLEEP ----
-    case 0x32:
-      {
-        Serial.println("[POWER] Sleep");
+    case SYSTEM_ACTION_WAKE:
+      usage = HID_SYSTEM_WAKE_UP;
+      break;
 
-        // ✅ Windows: Win + X → U → S
-        keyTap(MOD_LEFT_GUI, KB_X);
-        delay(300);
-        keyTap(MOD_NONE, KB_U);
-        delay(100);
-        keyTap(MOD_NONE, KB_S);
+    case SYSTEM_ACTION_RESTART:
+      usage = HID_SYSTEM_COLD_RESTART;
+      break;
 
-        // ✅ macOS: Ctrl + Shift + Power
-        // ✅ Linux: systemctl suspend
-        return;
-      }
-
-    // ---- WAKE ----
-    case 0x83:
-      {
-        Serial.println("[POWER] Wake — không cần gửi");
-        // Windows tự wake khi có input
-        return;
-      }
+    case SYSTEM_ACTION_RELOAD:
+      usage = HID_AC_REFRESH;
+      break;
 
     default:
-      return;
+      return false;
   }
+
+  if (!hidReadyOrRetry()) {
+    Serial.printf("[SYSTEM] HID not ready, action=%u dropped\n", action);
+    return false;
+  }
+
+  Serial.printf("[SYSTEM] action=%u -> consumer usage=0x%04X\n", action, usage);
+
+  ConsumerControl.press(usage);
+  delay(8);
+  ConsumerControl.release();
+
+  // Keep the action isolated from keyboard state.
+  gModifiersMask = 0;
+  return true;
 }
 
 // ==========================================
@@ -420,21 +487,18 @@ static void handlePowerControl(uint8_t keycode) {
 static void handleSmartKeyTap(uint8_t modifiers, uint8_t keycode) {
   if (keycode == 0x00) return;
 
-  // ✅ POWER / SLEEP / WAKE → xử lý riêng
-  if (keycode == 0x30 || keycode == 0x32 || keycode == 0x83) {
-    handlePowerControl(keycode);
-    return;
-  }
+  // IMPORTANT:
+  // Do NOT reserve keyboard usages such as 0x30/0x32 for power actions.
+  // 0x30 is a valid keyboard usage (']' on the standard HID keyboard page).
+  // System actions now use V2_SYSTEM_ACTION instead.
 
-  // ✅ Consumer keys (media) → ConsumerControl
   if (isConsumerKey(keycode)) {
     ConsumerControl.press(keycode);
-    delay(10);
+    delay(8);
     ConsumerControl.release();
     return;
   }
 
-  // ✅ Keyboard keys → keyTap
   keyTap(modifiers, keycode);
 }
 
@@ -444,9 +508,7 @@ static void handleSmartKeyTap(uint8_t modifiers, uint8_t keycode) {
 static void handleConsumerAction(uint8_t cmd, uint16_t usageCode) {
   uint8_t mappedCode = 0;
   switch (usageCode) {
-    case 0x0030: mappedCode = 0x30; break;
-    case 0x0032: mappedCode = 0x32; break;
-    case 0x0083: mappedCode = 0x83; break;
+    // Legacy 8-bit consumer usages supported by the existing protocol.
     case 0x00E2: mappedCode = 0xE2; break;
     case 0x00E9: mappedCode = 0xE9; break;
     case 0x00EA: mappedCode = 0xEA; break;
@@ -458,9 +520,27 @@ static void handleConsumerAction(uint8_t cmd, uint16_t usageCode) {
     case 0x00B4: mappedCode = 0xB4; break;
     case 0x006F: mappedCode = 0x6F; break;
     case 0x0070: mappedCode = 0x70; break;
-    case 0x009E: mappedCode = 0x9E; break;
     case 0x0076: mappedCode = 0x76; break;
-    default: return;
+
+    // Standard System usages: send directly as 16-bit Consumer usages.
+    case HID_SYSTEM_POWER_DOWN:
+    case HID_SYSTEM_SLEEP:
+    case HID_SYSTEM_WAKE_UP:
+    case HID_SYSTEM_COLD_RESTART:
+    case HID_AC_REFRESH:
+      if (cmd == V2_CONSUMER_TAP) {
+        ConsumerControl.press(usageCode);
+        delay(8);
+        ConsumerControl.release();
+      } else if (cmd == V2_CONSUMER_DOWN) {
+        ConsumerControl.press(usageCode);
+      } else if (cmd == V2_CONSUMER_UP) {
+        ConsumerControl.release();
+      }
+      return;
+
+    default:
+      return;
   }
   switch (cmd) {
     case V2_CONSUMER_TAP:
@@ -494,8 +574,8 @@ void clearAllHardwareStates() {
 
   ConsumerControl.release();
 
-  if (packetQueue != nullptr) {
-    xQueueReset(packetQueue);
+  if (keyboardQueue != nullptr) {
+    xQueueReset(keyboardQueue);
   }
 
   if (activeTcpClient && activeTcpClient.connected()) {
@@ -515,6 +595,68 @@ bool verifyPlainPassword(const uint8_t* inputBytes, size_t length) {
   size_t storedLen = strlen(cfg_sys_password);
   if (length != storedLen) return false;
   return memcmp(inputBytes, cfg_sys_password, length) == 0;
+}
+
+static void handleSmartKeyTap(uint8_t modifiers, uint8_t keycode);
+static void handleConsumerAction(uint8_t cmd, uint16_t usageCode);
+static bool sendSystemAction(uint8_t action);
+// ==========================================
+// 7b. KEYBOARD / SYSTEM ASYNC QUEUE
+// ==========================================
+static bool enqueueKeyboardEvent(uint8_t type, uint8_t a = 0, uint8_t b = 0, uint16_t usage = 0) {
+  if (keyboardQueue == nullptr) return false;
+  KeyboardEvent ev{type, a, b, usage};
+  // NEVER block the network/mouse path waiting for keyboard. The queue is
+  // deliberately large and the worker has higher priority than the parser.
+  // Under normal operation it drains immediately.
+  return xQueueSend(keyboardQueue, &ev, 0) == pdTRUE;
+}
+
+static void keyboardTaskWorker(void* pvParameters) {
+  KeyboardEvent ev;
+  for (;;) {
+    if (xQueueReceive(keyboardQueue, &ev, portMAX_DELAY) != pdTRUE) continue;
+
+    // USB readiness belongs to this task, never to the mouse/network path.
+    // Wait until TinyUSB can accept the report instead of dropping a key.
+    while (!tud_hid_ready()) {
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    switch (ev.type) {
+      case KBEV_SET_MODIFIERS:
+        setModifiers(ev.a);
+        break;
+
+      case KBEV_KEY_DOWN:
+        keyDown(ev.a);
+        break;
+
+      case KBEV_KEY_UP:
+        keyUp(ev.a);
+        break;
+
+      case KBEV_KEY_TAP:
+        handleSmartKeyTap(ev.a, ev.b);
+        break;
+
+      case KBEV_CONSUMER_TAP:
+      case KBEV_CONSUMER_DOWN:
+      case KBEV_CONSUMER_UP:
+        handleConsumerAction(ev.type == KBEV_CONSUMER_TAP ? V2_CONSUMER_TAP :
+                             ev.type == KBEV_CONSUMER_DOWN ? V2_CONSUMER_DOWN :
+                                                             V2_CONSUMER_UP,
+                             ev.usage);
+        break;
+
+      case KBEV_SYSTEM_ACTION:
+        sendSystemAction(ev.a);
+        break;
+
+      default:
+        break;
+    }
+  }
 }
 
 // ==========================================
@@ -571,7 +713,6 @@ void parseHidCommand(const uint8_t* data, size_t length, bool isBluetooth) {
   if (data[0] == CMD_SWITCH_TO_WIFI) {
     Serial.println("[PARSER] Yêu cầu chuyển sang WIFI");
     sendSystemByteResponse(REP_SWITCH_OK, isBluetooth);
-    // ✅ BLE: 100ms (giữ nguyên), TCP: 10ms (nhanh hơn)
     delay(isBluetooth ? 100 : 10);
     gPendingMode = MODE_WIFI;
     gPendingSwitch = true;
@@ -687,16 +828,16 @@ void parseHidCommand(const uint8_t* data, size_t length, bool isBluetooth) {
 
       switch (cmd) {
         case V2_SET_MODIFIERS:
-          if (len == 1) setModifiers(payload[0]);
+          if (len == 1) enqueueKeyboardEvent(KBEV_SET_MODIFIERS, payload[0]);
           break;
         case V2_KEY_DOWN:
-          if (len == 1) keyDown(payload[0]);
+          if (len == 1) enqueueKeyboardEvent(KBEV_KEY_DOWN, payload[0]);
           break;
         case V2_KEY_UP:
-          if (len == 1) keyUp(payload[0]);
+          if (len == 1) enqueueKeyboardEvent(KBEV_KEY_UP, payload[0]);
           break;
         case V2_KEY_TAP:
-          if (len == 2) handleSmartKeyTap(payload[0], payload[1]);
+          if (len == 2) enqueueKeyboardEvent(KBEV_KEY_TAP, payload[0], payload[1]);
           break;
         case V2_MOUSE_MOVE:
           if (len == 2) sendMouseMove((int8_t)payload[0], (int8_t)payload[1]);
@@ -713,12 +854,17 @@ void parseHidCommand(const uint8_t* data, size_t length, bool isBluetooth) {
         case V2_MOUSE_UP:
           if (len == 1) sendMouseButtonUp(payload[0]);
           break;
+        case V2_SYSTEM_ACTION:
+          if (len == 1) enqueueKeyboardEvent(KBEV_SYSTEM_ACTION, payload[0]);
+          break;
         case V2_CONSUMER_TAP:
         case V2_CONSUMER_DOWN:
         case V2_CONSUMER_UP:
           if (len == 2) {
             uint16_t usageCode = (uint16_t)((payload[0] << 8) | payload[1]);
-            handleConsumerAction(cmd, usageCode);
+            uint8_t evType = (cmd == V2_CONSUMER_TAP) ? KBEV_CONSUMER_TAP :
+                             (cmd == V2_CONSUMER_DOWN) ? KBEV_CONSUMER_DOWN : KBEV_CONSUMER_UP;
+            enqueueKeyboardEvent(evType, 0, 0, usageCode);
           }
           break;
         default: break;
@@ -735,7 +881,8 @@ void parseHidCommand(const uint8_t* data, size_t length, bool isBluetooth) {
     uint8_t byte2 = data[i + 2];
 
     switch (type) {
-      case CMD_KEY: handleSmartKeyTap(byte1, byte2); break;
+      case CMD_KEY: enqueueKeyboardEvent(KBEV_KEY_TAP, byte1, byte2); break;
+      case CMD_SYSTEM_ACTION: enqueueKeyboardEvent(KBEV_SYSTEM_ACTION, byte1); break;
       case CMD_MOUSE_MOVE: sendMouseMove((int8_t)byte1, (int8_t)byte2); break;
       case CMD_MOUSE_CLICK: sendMouseClick(byte1); break;
       case CMD_MOUSE_SCROLL: sendMouseScroll((int8_t)byte1, (int8_t)byte2); break;
@@ -745,34 +892,214 @@ void parseHidCommand(const uint8_t* data, size_t length, bool isBluetooth) {
 }
 
 // ==========================================
-// 9. QUEUE
+// 9. UNIFIED WI-FI TCP STREAM FRAMER
 // ==========================================
-void pushToQueue(const uint8_t* buffer, size_t size) {
-  if (packetQueue == nullptr || size == 0) return;
+// TCP is a byte stream. The old implementation copied every frame into a
+// FreeRTOS queue and then memmoved the remaining bytes. That created extra
+// latency and, when the queue filled, could block the RX path for 5 ms.
+//
+// This implementation uses a fixed ring buffer and dispatches complete frames
+// immediately. Mouse move/scroll never enter a queue. Keyboard/system events
+// are handed to keyboardQueue and processed by KeyboardTask.
+static const size_t WIFI_RX_RING_SIZE = 1024;
+static uint8_t wifiRxRing[WIFI_RX_RING_SIZE];
+static size_t wifiRxHead = 0;
+static size_t wifiRxTail = 0;
+static size_t wifiRxCount = 0;
+static bool wifiV2Batch = false;
 
-  Packet p;
-  size_t bytesToCopy = min(size, (size_t)64);
-  memcpy(p.data, buffer, bytesToCopy);
-  p.length = bytesToCopy;
+static void resetWifiRxBuffer() {
+  wifiRxHead = 0;
+  wifiRxTail = 0;
+  wifiRxCount = 0;
+  wifiV2Batch = false;
+}
 
-  if (xQueueSend(packetQueue, &p, 0) != pdTRUE) {
-    Serial.println("[QUEUE] ⚠️ Queue đầy — dropping old packet");
-    Packet dummy;
-    xQueueReceive(packetQueue, &dummy, 0);
-    xQueueSend(packetQueue, &p, 0);
+static size_t wifiRingFree() {
+  return WIFI_RX_RING_SIZE - wifiRxCount;
+}
+
+static uint8_t wifiRingPeek(size_t offset) {
+  return wifiRxRing[(wifiRxTail + offset) % WIFI_RX_RING_SIZE];
+}
+
+static void wifiRingConsume(size_t n) {
+  if (n >= wifiRxCount) {
+    resetWifiRxBuffer();
+    return;
+  }
+  wifiRxTail = (wifiRxTail + n) % WIFI_RX_RING_SIZE;
+  wifiRxCount -= n;
+}
+
+static bool wifiRingCopyOut(size_t offset, uint8_t* dst, size_t len) {
+  if (!dst || offset + len > wifiRxCount) return false;
+  for (size_t i = 0; i < len; ++i) dst[i] = wifiRingPeek(offset + i);
+  return true;
+}
+
+static bool isV2CommandByte(uint8_t cmd) {
+  switch (cmd) {
+    case V2_SET_MODIFIERS:
+    case V2_KEY_DOWN:
+    case V2_KEY_UP:
+    case V2_KEY_TAP:
+    case V2_MOUSE_MOVE:
+    case V2_MOUSE_SCROLL:
+    case V2_MOUSE_CLICK:
+    case V2_MOUSE_DOWN:
+    case V2_MOUSE_UP:
+    case V2_SYSTEM_ACTION:
+    case V2_CONSUMER_TAP:
+    case V2_CONSUMER_DOWN:
+    case V2_CONSUMER_UP:
+      return true;
+    default:
+      return false;
   }
 }
 
-void parserTaskWorker(void* pvParameters) {
-  Packet packet;
-  while (true) {
-    if (xQueueReceive(packetQueue, &packet, portMAX_DELAY) == pdTRUE) {
-      parseHidCommand(packet.data, packet.length, (currentMode == MODE_BLE));
+static bool wifiFrameLength(const uint8_t* b, size_t n, size_t& frameLen) {
+  if (!b || n == 0) return false;
+
+  if (b[0] == V2_MAGIC) {
+    if (n < 2) return false;
+    if (b[1] != V2_VERSION) { frameLen = 1; return true; }
+    if (n < 4) return false;
+    frameLen = 4 + b[3];
+    return frameLen <= 64 && n >= frameLen;
+  }
+
+  if (b[0] == CMD_KEY || b[0] == CMD_SYSTEM_ACTION ||
+      b[0] == CMD_MOUSE_MOVE || b[0] == CMD_MOUSE_CLICK ||
+      b[0] == CMD_MOUSE_SCROLL) {
+    frameLen = 3;
+    return n >= frameLen;
+  }
+
+  if (b[0] == CMD_AUTH_PASSWORD) {
+    if (n < 2) return false;
+    frameLen = 2 + b[1];
+    return frameLen <= 64 && n >= frameLen;
+  }
+
+  if (b[0] == CMD_UPDATE_WIFI) {
+    if (n < 2) return false;
+    size_t ssidLen = b[1];
+    if (n < 3 + ssidLen) return false;
+    size_t passLen = b[2 + ssidLen];
+    frameLen = 3 + ssidLen + passLen;
+    return frameLen <= 64 && n >= frameLen;
+  }
+
+  if (b[0] == CMD_IDENTIFY_ROLE) {
+    frameLen = 2;
+    return n >= frameLen;
+  }
+
+  if (b[0] == CMD_PING || b[0] == CMD_GET_CONFIG ||
+      b[0] == CMD_SWITCH_TO_WIFI || b[0] == CMD_SWITCH_TO_BLE ||
+      b[0] == CMD_SWITCH_TO_SETUP) {
+    frameLen = 1;
+    return true;
+  }
+
+  frameLen = 1;
+  return true;
+}
+
+static bool wifiRingWrite(const uint8_t* data, size_t len) {
+  if (!data || len == 0) return true;
+  if (len > wifiRingFree()) return false;
+
+  size_t first = min(len, WIFI_RX_RING_SIZE - wifiRxHead);
+  memcpy(wifiRxRing + wifiRxHead, data, first);
+  if (len > first) memcpy(wifiRxRing, data + first, len - first);
+  wifiRxHead = (wifiRxHead + len) % WIFI_RX_RING_SIZE;
+  wifiRxCount += len;
+  return true;
+}
+
+static void dispatchWifiFrame(const uint8_t* frame, size_t frameLen) {
+  if (!frame || frameLen == 0) return;
+  // One fixed stack copy only. There is no packet queue, no heap allocation,
+  // and no task hand-off on the mouse hot path.
+  parseHidCommand(frame, frameLen, false);
+}
+
+static void feedWifiStream(const uint8_t* data, size_t length) {
+  if (!data || length == 0) return;
+
+  if (!wifiRingWrite(data, length)) {
+    // Never grow memory and never block for milliseconds. Preserve existing
+    // data first; drop the newest RX chunk only if the fixed ring is full.
+    Serial.printf("[WIFI-RX] Ring full: dropping %u incoming bytes\n", (unsigned)length);
+    return;
+  }
+
+  uint8_t frame[64];
+  while (wifiRxCount > 0) {
+    // V2 batch header: AA 01. Android may put multiple TLVs after one header.
+    if (!wifiV2Batch && wifiRxCount >= 2 && wifiRingPeek(0) == V2_MAGIC &&
+        wifiRingPeek(1) == V2_VERSION) {
+      wifiRingConsume(2);
+      wifiV2Batch = true;
+      continue;
     }
+
+    if (wifiV2Batch) {
+      // A new AA 01 starts another V2 batch.
+      if (wifiRxCount >= 2 && wifiRingPeek(0) == V2_MAGIC &&
+          wifiRingPeek(1) == V2_VERSION) {
+        wifiRingConsume(2);
+        continue;
+      }
+
+      if (wifiRxCount < 2) break;
+      uint8_t cmd = wifiRingPeek(0);
+      uint8_t len = wifiRingPeek(1);
+
+      if (!isV2CommandByte(cmd)) {
+        // Not a V2 TLV. Leave V2 mode and let legacy parser resynchronize.
+        wifiV2Batch = false;
+        continue;
+      }
+
+      size_t total = 2 + (size_t)len;
+      if (total > 62) {
+        Serial.printf("[WIFI-RX] Invalid V2 TLV length: %u\n", (unsigned)len);
+        wifiRingConsume(1);
+        wifiV2Batch = false;
+        continue;
+      }
+      if (wifiRxCount < total) break;
+
+      // Reconstruct the canonical frame expected by parseHidCommand().
+      frame[0] = V2_MAGIC;
+      frame[1] = V2_VERSION;
+      wifiRingCopyOut(0, frame + 2, total);
+      wifiRingConsume(total);
+      dispatchWifiFrame(frame, total + 2);
+      continue;
+    }
+
+    // Legacy/control frame path.
+    size_t probeLen = min(wifiRxCount, (size_t)64);
+    wifiRingCopyOut(0, frame, probeLen);
+    size_t frameLen = 0;
+    if (!wifiFrameLength(frame, probeLen, frameLen)) break;
+
+    if (frameLen == 0 || frameLen > 64 || frameLen > wifiRxCount) {
+      wifiRingConsume(1);
+      continue;
+    }
+
+    wifiRingCopyOut(0, frame, frameLen);
+    wifiRingConsume(frameLen);
+    dispatchWifiFrame(frame, frameLen);
   }
 }
 
-// ==========================================
 // 10. PHẢN HỒI
 // ==========================================
 void sendSystemByteResponse(uint8_t statusByte, bool isBluetooth) {
@@ -854,7 +1181,6 @@ void loadConfigFromNVS() {
 
   cfg_tcp_port = preferences.getUShort("tcp_port", 1989);
 
-  // ⚠️ MẶC ĐỊNH MODE_BLE KHI NVS TRỐNG
   currentMode = (DeviceMode)preferences.getInt("last_mode", MODE_BLE);
   preferences.end();
 
@@ -908,6 +1234,7 @@ void stopTcpServer() {
     activeTcpClient.stop();
     activeTcpClient = WiFiClient();
   }
+  resetWifiRxBuffer();
   if (tcpServer != nullptr) {
     tcpServer->end();
     tcpServer->stop();
@@ -995,7 +1322,9 @@ class BleCallbacks : public NimBLECharacteristicCallbacks {
       Serial.printf("[BLE] ⚠️ Gói quá lớn (%u bytes), cắt xuống 64.\n", (unsigned)v.size());
       v.resize(64);
     }
-    pushToQueue((const uint8_t*)v.data(), v.size());
+    // BLE write callbacks already provide one bounded ATT payload. Parse it
+    // directly so mouse movement never waits behind a generic packet queue.
+    parseHidCommand((const uint8_t*)v.data(), v.size(), true);
   }
 };
 
@@ -1451,7 +1780,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
-  Serial.println("=== ESP32-S3 Hybrid HID Core v4.1 ===");
+  Serial.println("=== ESP32-S3 Hybrid HID Core v4.2 ===");
   Serial.println("=== 3 MODE TÁCH BIỆT ===");
 
   // ---- Nút BOOT ----
@@ -1463,13 +1792,14 @@ void setup() {
   ConsumerControl.begin();
   USB.begin();
 
-  // ---- Queue + Parser Task ----
-  packetQueue = xQueueCreate(50, sizeof(Packet));
-  if (packetQueue == nullptr) {
-    Serial.println("[FATAL] Không tạo được Queue!");
+  // ---- Dedicated keyboard/system queue + worker ----
+  keyboardQueue = xQueueCreate(256, sizeof(KeyboardEvent));
+  if (keyboardQueue == nullptr) {
+    Serial.println("[FATAL] Không tạo được KeyboardQueue!");
+  } else {
+    xTaskCreatePinnedToCore(
+      keyboardTaskWorker, "KeyboardTask", 4096, NULL, 7, &keyboardTaskHandle, 1);
   }
-  xTaskCreatePinnedToCore(
-    parserTaskWorker, "ParserTask", 4096, NULL, 5, &parserTaskHandle, 1);
 
   // ---- Load config ----
   loadConfigFromNVS();
@@ -1517,6 +1847,7 @@ void loop() {
       while (activeTcpClient.available() > 0) activeTcpClient.read();
       activeTcpClient.stop();
       activeTcpClient = WiFiClient();
+      resetWifiRxBuffer();
       clearAllHardwareStates();
       activeConnection.isConnected = false;
     }
@@ -1543,9 +1874,10 @@ void loop() {
           delay(30);
 
           activeTcpClient = newClient;
+          resetWifiRxBuffer();
           activeTcpClient.setNoDelay(true);
 
-          // ✅ TCP Keep-Alive (core v3.x)
+          // ✅ TCP Keep-Alive
           int keepAlive = 1;
           activeTcpClient.setSocketOption(SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(keepAlive));
 
@@ -1563,25 +1895,19 @@ void loop() {
       }
     }
 
-    // ---- ✅ TCP ZERO-COPY: Xử lý trực tiếp, không queue ----
+    // ---- TCP RX: đọc stream, KHÔNG xử lý HID trực tiếp ----
     if (activeTcpClient && activeTcpClient.connected()) {
-      int avail = activeTcpClient.available();
+      uint8_t buffer[256];
 
-      int maxPackets = 10;
-
-      while (avail > 0 && maxPackets > 0) {
-        uint8_t buffer[128];
-        int toRead = min(avail, 128);
+      while (activeTcpClient.available() > 0) {
+        int toRead = min(activeTcpClient.available(), (int)sizeof(buffer));
         int len = activeTcpClient.read(buffer, toRead);
 
         if (len > 0) {
-          parseHidCommand(buffer, len, false);
+          feedWifiStream(buffer, (size_t)len);
+        } else {
+          break;
         }
-
-        avail = activeTcpClient.available();
-        maxPackets--;
-
-        delay(1);
       }
     }
   }
