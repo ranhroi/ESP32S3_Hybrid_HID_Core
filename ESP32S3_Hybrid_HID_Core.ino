@@ -13,14 +13,6 @@
  *   - Nút BOOT giữ 3s → vào MODE_SETUP (dự phòng)
  *   - Cứu hộ tự tắt sau khi lưu Wi-Fi
  * 
- * SYSTEM ACTIONS: xử lý hoàn toàn ở tầng server bằng HID Consumer Control chuẩn.
- *   - POWER   → System Power Down (Consumer 0x0081)
- *   - SLEEP   → System Sleep (Consumer 0x0082)
- *   - WAKE    → System Wake Up (Consumer 0x0083)
- *   - RESTART → System Cold Restart (Consumer 0x008E)
- *   - RELOAD  → AC Refresh (Consumer 0x0227)
- * Không dùng các keyboard shortcut phụ thuộc Windows.
- * 
  * Bo mạch: ESP32-S3 Dev Module
  * USB Mode: USB-OTG (TinyUSB)
  *
@@ -132,13 +124,12 @@ struct KeyboardEvent {
 };
 
 static const uint8_t KBEV_SET_MODIFIERS = 1;
-static const uint8_t KBEV_KEY_DOWN      = 2;
-static const uint8_t KBEV_KEY_UP        = 3;
-static const uint8_t KBEV_KEY_TAP       = 4;
-static const uint8_t KBEV_CONSUMER_TAP  = 5;
+static const uint8_t KBEV_KEY_DOWN = 2;
+static const uint8_t KBEV_KEY_UP = 3;
+static const uint8_t KBEV_KEY_TAP = 4;
+static const uint8_t KBEV_CONSUMER_TAP = 5;
 static const uint8_t KBEV_CONSUMER_DOWN = 6;
-static const uint8_t KBEV_CONSUMER_UP   = 7;
-static const uint8_t KBEV_SYSTEM_ACTION = 8;
+static const uint8_t KBEV_CONSUMER_UP = 7;
 
 QueueHandle_t keyboardQueue = nullptr;
 TaskHandle_t keyboardTaskHandle = nullptr;
@@ -168,7 +159,7 @@ static const uint8_t CMD_KEY = 0x01;
 static const uint8_t CMD_MOUSE_MOVE = 0x02;
 static const uint8_t CMD_MOUSE_CLICK = 0x03;
 static const uint8_t CMD_MOUSE_SCROLL = 0x04;
-static const uint8_t CMD_SYSTEM_ACTION = 0x05; // [cmd, action, 0]
+static const uint8_t CMD_SYSTEM_ACTION = 0x05;  // [cmd, action, 0]
 
 // ---- v2: TLV ----
 static const uint8_t V2_MAGIC = 0xAA;
@@ -186,20 +177,31 @@ static const uint8_t V2_CONSUMER_TAP = 0x20;
 static const uint8_t V2_CONSUMER_DOWN = 0x21;
 static const uint8_t V2_CONSUMER_UP = 0x22;
 
+// ---- v2: TLV Joystick Expansion (FULL GAMEPAD SPECIFICATION) ----
+static const uint8_t V2_JOYSTICK_LEFT = 0x40;   // Cần gạt Trái [cmd, len, x, y]
+static const uint8_t V2_JOYSTICK_RIGHT = 0x41;  // Cần gạt Phải [cmd, len, x, y]
+static const uint8_t V2_DPAD_MOVE = 0x42;       // Cụm phím D-Pad [cmd, len, dpad_value]
+static const uint8_t V2_JOYSTICK_DOWN = 0x43;   // Nhấn nút [cmd, len, button_id]
+static const uint8_t V2_JOYSTICK_UP = 0x44;     // Nhả nút [cmd, len, button_id]
+
+
 // Server-side system actions. These are NOT keyboard keycodes.
 static const uint8_t V2_SYSTEM_ACTION = 0x30;
+
+// --- PHÂN LOẠI LỆNH THEO HỆ ĐIỀU HÀNH MỤC TIÊU ---
+// Mặc định (Dành cho thiết bị nhận HID chuẩn)
+
+// Dành riêng cho WINDOWS (Kích hoạt chuỗi phím tắt Win+X)
 static const uint8_t SYSTEM_ACTION_POWER = 0x01;
-static const uint8_t SYSTEM_ACTION_SLEEP = 0x02;
-static const uint8_t SYSTEM_ACTION_WAKE = 0x03;
-static const uint8_t SYSTEM_ACTION_RESTART = 0x04;
-static const uint8_t SYSTEM_ACTION_RELOAD = 0x05;
+static const uint8_t SYSTEM_ACTION_RESTART = 0x02;
+static const uint8_t SYSTEM_ACTION_SLEEP = 0x03;
+static const uint8_t SYSTEM_ACTION_WAKE = 0x04;
 
 // USB HID Consumer/System usages.
-static const uint16_t HID_SYSTEM_POWER_DOWN = 0x0081;
-static const uint16_t HID_SYSTEM_SLEEP = 0x0082;
-static const uint16_t HID_SYSTEM_WAKE_UP = 0x0083;
-static const uint16_t HID_SYSTEM_COLD_RESTART = 0x008E;
-static const uint16_t HID_AC_REFRESH = 0x0227;
+static const uint16_t HID_SYSTEM_POWER_DOWN = 0x0030;
+static const uint16_t HID_SYSTEM_COLD_RESTART = 0x0031;
+static const uint16_t HID_SYSTEM_SLEEP = 0x0032;
+
 
 // ==========================================
 // 4. UUID BLE ĐỘNG
@@ -249,6 +251,20 @@ void checkBootButton();
 void handleApiExitSetup();
 static void resetWifiRxBuffer();
 static void feedWifiStream(const uint8_t* data, size_t length);
+
+static void handleSmartKeyTap(uint8_t modifiers, uint8_t keycode);
+static void handleConsumerAction(uint8_t cmd, uint16_t usageCode);
+
+// ==========================================
+// SYSTEM ACTION - FORWARD DECLARATIONS
+// ==========================================
+static bool sendSystemAction(uint8_t action);
+static bool systemSendCharHID(char c);
+static bool systemSendTextHID(const char* text);
+static bool systemOpenWindowsCMD();
+static void doWindowsPower();
+static void doWindowsRestart();
+static void doWindowsSleep();
 
 // ==========================================
 // 5. BẢN ĐỒ MÃ HID
@@ -322,6 +338,7 @@ const uint8_t KB_GRAVE = 0x35;
 const uint8_t KB_COMMA = 0x36;
 const uint8_t KB_PERIOD = 0x37;
 const uint8_t KB_SLASH = 0x38;
+const uint8_t KB_DELETE = 0x4C;
 
 const uint8_t KB_F1 = 0x3A;
 const uint8_t KB_F2 = 0x3B;
@@ -431,55 +448,143 @@ static bool isConsumerKey(uint8_t k) {
   return false;
 }
 
-// ==========================================
-// 6d. SERVER-SIDE SYSTEM ACTIONS
-// ==========================================
-// The phone sends only a small action ID.
-// ESP32 translates it to a standard HID Consumer/System usage.
-// This keeps OS-specific keyboard shortcuts out of the phone protocol.
-static bool sendSystemAction(uint8_t action) {
-  uint16_t usage = 0;
 
+
+// ==========================================
+// 6d. SYSTEM ACTIONS — 3 HỆ ĐIỀU HÀNH
+// ==========================================
+static const uint16_t SYSTEM_KEY_GAP_MS = 10;
+static const uint16_t SYSTEM_RUN_DELAY_MS = 180;
+static const uint16_t SYSTEM_CMD_OPEN_DELAY_MS = 450;
+
+static bool systemSendCharHID(char c) {
+  uint8_t modifiers = MOD_NONE;
+  uint8_t keycode = KB_NONE;
+  if (c >= 'a' && c <= 'z') keycode = KB_A + (uint8_t)(c - 'a');
+  else if (c >= 'A' && c <= 'Z') {
+    modifiers = MOD_LEFT_SHIFT;
+    keycode = KB_A + (uint8_t)(c - 'A');
+  } else if (c >= '1' && c <= '9') keycode = KB_1 + (uint8_t)(c - '1');
+  else if (c == '0') keycode = KB_0;
+  else {
+    switch (c) {
+      case ' ': keycode = KB_SPACE; break;
+      case '/': keycode = KB_SLASH; break;
+      case '-': keycode = KB_MINUS; break;
+      case '.': keycode = KB_PERIOD; break;
+      case ',': keycode = KB_COMMA; break;
+      default: return false;
+    }
+  }
+  if (!hidReadyOrRetry()) return false;
+  keyTap(modifiers, keycode);
+  delay(SYSTEM_KEY_GAP_MS);
+  return true;
+}
+
+static bool systemSendTextHID(const char* text) {
+  if (!text) return false;
+  while (*text) {
+    if (!systemSendCharHID(*text++)) return false;
+  }
+  return true;
+}
+
+static bool systemOpenWindowsCMD() {
+  if (!hidReadyOrRetry()) return false;
+  keyTap(MOD_LEFT_GUI, KB_R);
+  delay(SYSTEM_RUN_DELAY_MS);
+  if (!systemSendTextHID("cmd")) return false;
+  keyTap(MOD_NONE, KB_ENTER);
+  delay(SYSTEM_CMD_OPEN_DELAY_MS);
+  return true;
+}
+
+static void doWindowsPower() {
+  if (!systemOpenWindowsCMD()) return;
+  if (!systemSendTextHID("shutdown /s /t 0")) return;
+  keyTap(MOD_NONE, KB_ENTER);
+}
+
+static void doWindowsRestart() {
+  if (!systemOpenWindowsCMD()) return;
+  if (!systemSendTextHID("shutdown /r /t 0")) return;
+  keyTap(MOD_NONE, KB_ENTER);
+}
+
+static void doWindowsSleep() {
+  if (!systemOpenWindowsCMD()) return;
+  if (!systemSendTextHID("shutdown /h")) return;
+  keyTap(MOD_NONE, KB_ENTER);
+}
+
+// --- HÀM ĐIỀU PHỐI CHÍNH: ƯU TIÊN HID CHUẨN TRƯỚC ---
+static bool sendSystemAction(uint8_t action) {
+  Serial.printf("[SYSTEM ACTION] Nhận mã từ Android: 0x%02X\n", action);
+
+  if (!hidReadyOrRetry()) return false;
+
+  // ==========================================
+  // BƯỚC 1: LUÔN ƯU TIÊN BẮN MÃ HID PHẦN CỨNG GỐC
+  // ==========================================
   switch (action) {
     case SYSTEM_ACTION_POWER:
-      usage = HID_SYSTEM_POWER_DOWN;
-      break;
-
-    case SYSTEM_ACTION_SLEEP:
-      usage = HID_SYSTEM_SLEEP;
-      break;
-
-    case SYSTEM_ACTION_WAKE:
-      usage = HID_SYSTEM_WAKE_UP;
+      ConsumerControl.press(HID_SYSTEM_POWER_DOWN);
+      delay(8);
+      ConsumerControl.release();
+      gModifiersMask = MOD_NONE;
       break;
 
     case SYSTEM_ACTION_RESTART:
-      usage = HID_SYSTEM_COLD_RESTART;
+      ConsumerControl.press(HID_SYSTEM_COLD_RESTART);
+      delay(8);
+      ConsumerControl.release();
+      gModifiersMask = MOD_NONE;
       break;
 
-    case SYSTEM_ACTION_RELOAD:
-      usage = HID_AC_REFRESH;
+    case SYSTEM_ACTION_SLEEP:
+      ConsumerControl.press(HID_SYSTEM_SLEEP);
+      delay(8);
+      ConsumerControl.release();
+      gModifiersMask = MOD_NONE;
       break;
+
+    case SYSTEM_ACTION_WAKE:
+      Serial.println("[SYSTEM_ACTION] WAKE -> Giả lập Click chuột để gọi máy dậy");
+      if (hidReadyOrRetry()) {
+        Mouse.click(MS_LEFT);
+      }
+      return true;
+  }
+
+  // Đợi 50ms cho tầng Driver USB xử lý gói tin HID vừa gửi
+  delay(50);
+
+  // ==========================================
+  // BƯỚC 2: PHÂN LUỒNG XỬ LÝ PHÍM TẮT DỰ PHÒNG CHO TỪNG OS
+  // (Nếu máy tính là Windows, mã HID trên bị ngó lơ, phím tắt dưới này sẽ cứu cánh)
+  // ==========================================
+  switch (action) {
+    // Nhóm Windows Fallback
+    case SYSTEM_ACTION_POWER: doWindowsPower(); break;
+    case SYSTEM_ACTION_RESTART: doWindowsRestart(); break;
+    case SYSTEM_ACTION_SLEEP: doWindowsSleep(); break;
 
     default:
+      Serial.println("[SYSTEM ACTION] ⚠️ Mã lệnh không nằm trong danh mục xử lý!");
       return false;
   }
 
-  if (!hidReadyOrRetry()) {
-    Serial.printf("[SYSTEM] HID not ready, action=%u dropped\n", action);
-    return false;
-  }
-
-  Serial.printf("[SYSTEM] action=%u -> consumer usage=0x%04X\n", action, usage);
-
-  ConsumerControl.press(usage);
-  delay(8);
+  // ==========================================
+  // CHỐT CHẶN AN TOÀN: ÉP BUỘC GIẢI PHÓNG TOÀN BỘ PHÍM BẤM CHỐNG TREO PHÍM
+  // ==========================================
+  Keyboard.releaseAll();
   ConsumerControl.release();
+  gModifiersMask = MOD_NONE;
 
-  // Keep the action isolated from keyboard state.
-  gModifiersMask = 0;
   return true;
 }
+
 
 // ==========================================
 // 6e. SMART KEY TAP
@@ -521,26 +626,7 @@ static void handleConsumerAction(uint8_t cmd, uint16_t usageCode) {
     case 0x006F: mappedCode = 0x6F; break;
     case 0x0070: mappedCode = 0x70; break;
     case 0x0076: mappedCode = 0x76; break;
-
-    // Standard System usages: send directly as 16-bit Consumer usages.
-    case HID_SYSTEM_POWER_DOWN:
-    case HID_SYSTEM_SLEEP:
-    case HID_SYSTEM_WAKE_UP:
-    case HID_SYSTEM_COLD_RESTART:
-    case HID_AC_REFRESH:
-      if (cmd == V2_CONSUMER_TAP) {
-        ConsumerControl.press(usageCode);
-        delay(8);
-        ConsumerControl.release();
-      } else if (cmd == V2_CONSUMER_DOWN) {
-        ConsumerControl.press(usageCode);
-      } else if (cmd == V2_CONSUMER_UP) {
-        ConsumerControl.release();
-      }
-      return;
-
-    default:
-      return;
+    default: return;
   }
   switch (cmd) {
     case V2_CONSUMER_TAP:
@@ -597,15 +683,12 @@ bool verifyPlainPassword(const uint8_t* inputBytes, size_t length) {
   return memcmp(inputBytes, cfg_sys_password, length) == 0;
 }
 
-static void handleSmartKeyTap(uint8_t modifiers, uint8_t keycode);
-static void handleConsumerAction(uint8_t cmd, uint16_t usageCode);
-static bool sendSystemAction(uint8_t action);
 // ==========================================
 // 7b. KEYBOARD / SYSTEM ASYNC QUEUE
 // ==========================================
 static bool enqueueKeyboardEvent(uint8_t type, uint8_t a = 0, uint8_t b = 0, uint16_t usage = 0) {
   if (keyboardQueue == nullptr) return false;
-  KeyboardEvent ev{type, a, b, usage};
+  KeyboardEvent ev{ type, a, b, usage };
   // NEVER block the network/mouse path waiting for keyboard. The queue is
   // deliberately large and the worker has higher priority than the parser.
   // Under normal operation it drains immediately.
@@ -643,14 +726,9 @@ static void keyboardTaskWorker(void* pvParameters) {
       case KBEV_CONSUMER_TAP:
       case KBEV_CONSUMER_DOWN:
       case KBEV_CONSUMER_UP:
-        handleConsumerAction(ev.type == KBEV_CONSUMER_TAP ? V2_CONSUMER_TAP :
-                             ev.type == KBEV_CONSUMER_DOWN ? V2_CONSUMER_DOWN :
-                                                             V2_CONSUMER_UP,
+        handleConsumerAction(ev.type == KBEV_CONSUMER_TAP ? V2_CONSUMER_TAP : ev.type == KBEV_CONSUMER_DOWN ? V2_CONSUMER_DOWN
+                                                                                                            : V2_CONSUMER_UP,
                              ev.usage);
-        break;
-
-      case KBEV_SYSTEM_ACTION:
-        sendSystemAction(ev.a);
         break;
 
       default:
@@ -854,19 +932,22 @@ void parseHidCommand(const uint8_t* data, size_t length, bool isBluetooth) {
         case V2_MOUSE_UP:
           if (len == 1) sendMouseButtonUp(payload[0]);
           break;
-        case V2_SYSTEM_ACTION:
-          if (len == 1) enqueueKeyboardEvent(KBEV_SYSTEM_ACTION, payload[0]);
-          break;
         case V2_CONSUMER_TAP:
         case V2_CONSUMER_DOWN:
         case V2_CONSUMER_UP:
           if (len == 2) {
             uint16_t usageCode = (uint16_t)((payload[0] << 8) | payload[1]);
-            uint8_t evType = (cmd == V2_CONSUMER_TAP) ? KBEV_CONSUMER_TAP :
-                             (cmd == V2_CONSUMER_DOWN) ? KBEV_CONSUMER_DOWN : KBEV_CONSUMER_UP;
+            uint8_t evType = (cmd == V2_CONSUMER_TAP) ? KBEV_CONSUMER_TAP : (cmd == V2_CONSUMER_DOWN) ? KBEV_CONSUMER_DOWN
+                                                                                                      : KBEV_CONSUMER_UP;
             enqueueKeyboardEvent(evType, 0, 0, usageCode);
           }
           break;
+        case V2_SYSTEM_ACTION:
+          if (len == 1) {
+            sendSystemAction(payload[0]);
+          }
+          break;
+
         default: break;
       }
       idx += len;
@@ -882,7 +963,6 @@ void parseHidCommand(const uint8_t* data, size_t length, bool isBluetooth) {
 
     switch (type) {
       case CMD_KEY: enqueueKeyboardEvent(KBEV_KEY_TAP, byte1, byte2); break;
-      case CMD_SYSTEM_ACTION: enqueueKeyboardEvent(KBEV_SYSTEM_ACTION, byte1); break;
       case CMD_MOUSE_MOVE: sendMouseMove((int8_t)byte1, (int8_t)byte2); break;
       case CMD_MOUSE_CLICK: sendMouseClick(byte1); break;
       case CMD_MOUSE_SCROLL: sendMouseScroll((int8_t)byte1, (int8_t)byte2); break;
@@ -938,8 +1018,10 @@ static bool wifiRingCopyOut(size_t offset, uint8_t* dst, size_t len) {
   return true;
 }
 
+
 static bool isV2CommandByte(uint8_t cmd) {
   switch (cmd) {
+    // --- Các lệnh bàn phím và chuột có sẵn của bạn ---
     case V2_SET_MODIFIERS:
     case V2_KEY_DOWN:
     case V2_KEY_UP:
@@ -949,30 +1031,30 @@ static bool isV2CommandByte(uint8_t cmd) {
     case V2_MOUSE_CLICK:
     case V2_MOUSE_DOWN:
     case V2_MOUSE_UP:
-    case V2_SYSTEM_ACTION:
     case V2_CONSUMER_TAP:
     case V2_CONSUMER_DOWN:
     case V2_CONSUMER_UP:
-      return true;
-    default:
-      return false;
+    case V2_SYSTEM_ACTION: return true;
+    default: return false;
   }
 }
+
 
 static bool wifiFrameLength(const uint8_t* b, size_t n, size_t& frameLen) {
   if (!b || n == 0) return false;
 
   if (b[0] == V2_MAGIC) {
     if (n < 2) return false;
-    if (b[1] != V2_VERSION) { frameLen = 1; return true; }
+    if (b[1] != V2_VERSION) {
+      frameLen = 1;
+      return true;
+    }
     if (n < 4) return false;
     frameLen = 4 + b[3];
     return frameLen <= 64 && n >= frameLen;
   }
 
-  if (b[0] == CMD_KEY || b[0] == CMD_SYSTEM_ACTION ||
-      b[0] == CMD_MOUSE_MOVE || b[0] == CMD_MOUSE_CLICK ||
-      b[0] == CMD_MOUSE_SCROLL) {
+  if (b[0] == CMD_KEY || b[0] == CMD_SYSTEM_ACTION || b[0] == CMD_MOUSE_MOVE || b[0] == CMD_MOUSE_CLICK || b[0] == CMD_MOUSE_SCROLL) {
     frameLen = 3;
     return n >= frameLen;
   }
@@ -997,9 +1079,7 @@ static bool wifiFrameLength(const uint8_t* b, size_t n, size_t& frameLen) {
     return n >= frameLen;
   }
 
-  if (b[0] == CMD_PING || b[0] == CMD_GET_CONFIG ||
-      b[0] == CMD_SWITCH_TO_WIFI || b[0] == CMD_SWITCH_TO_BLE ||
-      b[0] == CMD_SWITCH_TO_SETUP) {
+  if (b[0] == CMD_PING || b[0] == CMD_GET_CONFIG || b[0] == CMD_SWITCH_TO_WIFI || b[0] == CMD_SWITCH_TO_BLE || b[0] == CMD_SWITCH_TO_SETUP) {
     frameLen = 1;
     return true;
   }
@@ -1040,8 +1120,7 @@ static void feedWifiStream(const uint8_t* data, size_t length) {
   uint8_t frame[64];
   while (wifiRxCount > 0) {
     // V2 batch header: AA 01. Android may put multiple TLVs after one header.
-    if (!wifiV2Batch && wifiRxCount >= 2 && wifiRingPeek(0) == V2_MAGIC &&
-        wifiRingPeek(1) == V2_VERSION) {
+    if (!wifiV2Batch && wifiRxCount >= 2 && wifiRingPeek(0) == V2_MAGIC && wifiRingPeek(1) == V2_VERSION) {
       wifiRingConsume(2);
       wifiV2Batch = true;
       continue;
@@ -1049,8 +1128,7 @@ static void feedWifiStream(const uint8_t* data, size_t length) {
 
     if (wifiV2Batch) {
       // A new AA 01 starts another V2 batch.
-      if (wifiRxCount >= 2 && wifiRingPeek(0) == V2_MAGIC &&
-          wifiRingPeek(1) == V2_VERSION) {
+      if (wifiRxCount >= 2 && wifiRingPeek(0) == V2_MAGIC && wifiRingPeek(1) == V2_VERSION) {
         wifiRingConsume(2);
         continue;
       }
@@ -1791,6 +1869,7 @@ void setup() {
   Mouse.begin();
   ConsumerControl.begin();
   USB.begin();
+
 
   // ---- Dedicated keyboard/system queue + worker ----
   keyboardQueue = xQueueCreate(256, sizeof(KeyboardEvent));
