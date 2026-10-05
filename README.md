@@ -210,6 +210,9 @@ MODE_WIFI  MODE_BLE        │                 │
                             └──────────────┘
 ```
 
+```
+Lưu ý là khi vừa khởi động lên nếu lần trước đang ở chế độ wi-fi nhưng wi-fi mode bị tắt nó chưa tìm thấy thì nó sẽ quay trở về mode setup vậy thì chúng ta phải vào thẳng trực tiếp địa chỉ để kích hoạt lại chế độ tùy chọn mà mình muốn
+```
 ---
 
 ## 📊 Sơ đồ luồng dữ liệu
