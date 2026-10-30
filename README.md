@@ -1,4 +1,4 @@
-# ESP32-S3 Hybrid HID Core v4.1
+# ESP32-S3 Hybrid HID Core v4.2
 
 > **Bàn phím + Chuột USB HID không dây** điều khiển qua **Bluetooth LE** hoặc **Wi-Fi TCP** từ điện thoại Android.
 
